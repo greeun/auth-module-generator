@@ -1,714 +1,489 @@
 ---
 name: auth-module-generator
-description: Use when creating authentication system for Next.js 15 App Router projects. Triggers on "인증 모듈", "auth module", "로그인 구현", "OAuth 설정", "JWT 인증", "magic link", "이메일 로그인" requests.
+description: Use when creating authentication system for any web project. Auto-detects framework (Next.js, Express, Fastify, NestJS, Hono, SvelteKit, Nuxt, etc.), ORM, and project conventions. Triggers on "인증 모듈", "auth module", "로그인 구현", "OAuth 설정", "JWT 인증", "magic link", "이메일 로그인", "authentication", "signup", "sign in" requests.
 ---
 
 # Auth Module Generator
 
-Next.js 15 App Router 기반 인증 모듈 생성 스킬.
+프로젝트 구조를 자동 감지하여 인증 모듈을 생성하는 프레임워크 독립 스킬.
 
-## 지원 인증 방식
+## Phase 0: 프로젝트 감지 (필수 - 코드 생성 전에 반드시 실행)
 
-| 방식 | 설명 | 파일 |
-|------|------|------|
-| ID/Password | bcrypt 해싱, JWT 토큰 | `login/route.ts`, `register/route.ts` |
-| OAuth | Google, GitHub | `oauth/[provider]/callback/route.ts` |
-| Magic Link | 이메일 일회용 링크 | `magic-link/route.ts` |
+스킬이 호출되면 **코드를 생성하기 전에** 아래 감지 단계를 반드시 수행한다.
 
-## 아키텍처 개요
+### 0.1 프레임워크 감지
 
+다음 파일들을 순서대로 확인하여 프레임워크를 결정한다:
+
+| 감지 파일 | 프레임워크 | 라우팅 방식 |
+|-----------|-----------|------------|
+| `next.config.*` + `app/` 디렉터리 | Next.js App Router | 파일 기반 (`route.ts`) |
+| `next.config.*` + `pages/` 디렉터리 | Next.js Pages Router | 파일 기반 (`pages/api/`) |
+| `nuxt.config.*` | Nuxt 3 | 파일 기반 (`server/api/`) |
+| `svelte.config.*` | SvelteKit | 파일 기반 (`+server.ts`) |
+| `astro.config.*` | Astro | 파일 기반 (`pages/api/`) |
+| `src/main.ts` + `@nestjs/core` in deps | NestJS | 데코레이터 기반 |
+| `fastify` in deps | Fastify | 플러그인 기반 |
+| `hono` in deps | Hono | 메서드 체이닝 |
+| `express` in deps | Express | 라우터 기반 |
+| `elysia` in deps | Elysia (Bun) | 메서드 체이닝 |
+
+**감지 방법:**
 ```
-src/
-├── app/api/auth/           # API 엔드포인트
-│   ├── login/              # POST - JWT 로그인
-│   ├── register/           # POST - 회원가입
-│   ├── logout/             # POST - 로그아웃
-│   ├── refresh/            # POST - 토큰 갱신
-│   ├── me/                 # GET - 현재 사용자
-│   ├── oauth/
-│   │   ├── login/          # POST - OAuth 시작
-│   │   ├── google/callback/# GET - Google 콜백
-│   │   └── github/callback/# GET - GitHub 콜백
-│   └── magic-link/
-│       ├── send/           # POST - 링크 발송
-│       └── verify/         # GET - 링크 검증
-├── shared/@withwiz/
-│   ├── auth/core/jwt/      # JWT Manager (프로젝트 독립적)
-│   └── middleware/         # 인증 미들웨어
-└── lib/
-    ├── services/auth/      # 인증 서비스
-    └── utils/              # jwt.ts, oauth.ts
+1. Glob: package.json, next.config.*, nuxt.config.*, svelte.config.*, astro.config.*
+2. Read: package.json → dependencies, devDependencies 확인
+3. Glob: app/**/route.ts, pages/api/**, src/main.ts, server/api/**
 ```
 
-## 생성 워크플로우
+### 0.2 ORM/DB 감지
 
-```dot
-digraph auth_flow {
-    rankdir=TB;
-    node [shape=box];
+| 감지 파일/의존성 | ORM | 스키마 형식 |
+|----------------|-----|-----------|
+| `prisma/schema.prisma` 또는 `@prisma/client` | Prisma | `.prisma` |
+| `drizzle.config.*` 또는 `drizzle-orm` | Drizzle | TypeScript 스키마 |
+| `typeorm` in deps | TypeORM | 데코레이터 엔티티 |
+| `mongoose` in deps | Mongoose | 스키마 정의 |
+| `@supabase/supabase-js` | Supabase | SQL migration |
+| `better-sqlite3` / `@libsql/client` | Raw SQL | SQL |
+| 감지 실패 | 없음 (인메모리 또는 사용자에게 질문) | — |
 
-    "1. 인증 방식 선택" -> "2. 환경 변수 설정";
-    "2. 환경 변수 설정" -> "3. DB 스키마 생성";
-    "3. DB 스키마 생성" -> "4. JWT 코어 생성";
-    "4. JWT 코어 생성" -> "5. 미들웨어 생성";
-    "5. 미들웨어 생성" -> "6. API 엔드포인트 생성";
-    "6. API 엔드포인트 생성" -> "7. 서비스 로직 생성";
-    "7. 서비스 로직 생성" -> "8. 테스트 및 검증";
-}
+### 0.3 기존 프로젝트 구조 감지
+
+```
+1. Glob: src/**/*, app/**/*, lib/**/*, utils/**/*, helpers/**/*
+2. 소스 루트 결정: src/ 존재 여부
+3. 기존 미들웨어 패턴 확인: middleware.ts, middleware/**, plugins/**
+4. 기존 에러 핸들링 패턴 확인: errors/**, exceptions/**
+5. 기존 유틸/헬퍼 위치 확인: lib/, utils/, helpers/, common/
+6. 기존 서비스 레이어 확인: services/**, modules/**
+7. 기존 import alias 확인: tsconfig.json → paths (예: @/*, ~/*, #/*)
 ```
 
-## 1. 환경 변수 설정
+### 0.4 기존 인증 관련 코드 감지
 
-```env
-# JWT 설정 (필수)
-JWT_SECRET=<최소 32자 비밀키>
-JWT_EXPIRES_IN=7d
-JWT_REFRESH_TOKEN_EXPIRES_IN=30d
-
-# OAuth - Google (선택)
-GOOGLE_CLIENT_ID=
-GOOGLE_CLIENT_SECRET=
-GOOGLE_REDIRECT_URI=http://localhost:3000/api/auth/oauth/google/callback
-
-# OAuth - GitHub (선택)
-GITHUB_CLIENT_ID=
-GITHUB_CLIENT_SECRET=
-GITHUB_REDIRECT_URI=http://localhost:3000/api/auth/oauth/github/callback
-
-# Magic Link (선택)
-MAGIC_LINK_SECRET=<32자 비밀키>
-MAGIC_LINK_EXPIRES_IN=15m
-EMAIL_FROM=noreply@example.com
-
-# Redis (토큰 블랙리스트용)
-UPSTASH_REDIS_REST_URL=
-UPSTASH_REDIS_REST_TOKEN=
+```
+1. Grep: "auth", "login", "session", "jwt", "bcrypt", "passport" 등
+2. 이미 NextAuth/Auth.js 사용 중인지 확인: next-auth in deps
+3. 이미 Passport.js 사용 중인지 확인: passport in deps
+4. 이미 자체 인증이 있는지 확인: auth 관련 라우트/모듈 존재 여부
 ```
 
-## 2. Prisma 스키마
+> 기존 인증 시스템이 발견되면 사용자에게 보고하고, 통합/교체/공존 여부를 질문한다.
 
+### 0.5 패키지 매니저 감지
+
+| 감지 파일 | 매니저 | 설치 명령 |
+|-----------|--------|----------|
+| `bun.lockb` / `bun.lock` | bun | `bun add` |
+| `pnpm-lock.yaml` | pnpm | `pnpm add` |
+| `yarn.lock` | yarn | `yarn add` |
+| `package-lock.json` | npm | `npm install` |
+
+### 0.6 감지 결과 요약
+
+모든 감지가 끝나면 **반드시** 사용자에게 아래 형식으로 요약을 보여주고 확인을 받는다:
+
+```
+## 프로젝트 감지 결과
+
+| 항목 | 감지 결과 |
+|------|----------|
+| 프레임워크 | {framework} {version} |
+| 라우팅 방식 | {routing_style} |
+| ORM/DB | {orm} |
+| 소스 루트 | {src_root} |
+| 미들웨어 패턴 | {middleware_pattern} |
+| Import alias | {alias} |
+| 패키지 매니저 | {pkg_manager} |
+| 기존 인증 | {existing_auth} |
+```
+
+---
+
+## Phase 1: 인증 방식 선택
+
+사용자에게 AskUserQuestion으로 필요한 인증 방식을 질문한다:
+
+| 방식 | 설명 | 필요 의존성 |
+|------|------|-----------|
+| ID/Password | 이메일+비밀번호, bcrypt 해싱 | `bcryptjs`, `jose` |
+| OAuth | Google, GitHub, etc. | `jose` |
+| Magic Link | 이메일 일회용 링크 | `jose`, 이메일 서비스 |
+| Session 기반 | 서버 세션 + 쿠키 | `express-session` 등 (프레임워크별) |
+
+추가 옵션:
+- 토큰 저장 방식: HttpOnly Cookie (권장) vs Authorization Header
+- 토큰 블랙리스트: Redis / 인메모리 / DB
+- Refresh Token 사용 여부
+
+---
+
+## Phase 2: 코드 생성 (감지된 구조에 맞춤)
+
+### 2.1 생성할 파일 결정
+
+감지된 프레임워크에 따라 파일 경로를 동적으로 결정한다.
+**절대로 하드코딩된 경로를 사용하지 않는다.** 감지된 `{src_root}`, `{api_base}`, `{util_dir}` 등의 변수를 사용한다.
+
+#### 프레임워크별 라우트 매핑
+
+**Next.js App Router:**
+```
+{src_root}/app/api/auth/login/route.ts
+{src_root}/app/api/auth/register/route.ts
+{src_root}/app/api/auth/logout/route.ts
+{src_root}/app/api/auth/refresh/route.ts
+{src_root}/app/api/auth/me/route.ts
+{src_root}/app/api/auth/oauth/[provider]/callback/route.ts
+{src_root}/app/api/auth/magic-link/send/route.ts
+{src_root}/app/api/auth/magic-link/verify/route.ts
+```
+
+**Next.js Pages Router:**
+```
+{src_root}/pages/api/auth/login.ts
+{src_root}/pages/api/auth/register.ts
+{src_root}/pages/api/auth/logout.ts
+{src_root}/pages/api/auth/refresh.ts
+{src_root}/pages/api/auth/me.ts
+{src_root}/pages/api/auth/oauth/[provider]/callback.ts
+{src_root}/pages/api/auth/magic-link/send.ts
+{src_root}/pages/api/auth/magic-link/verify.ts
+```
+
+**Express / Fastify / Hono:**
+```
+{src_root}/{routes_dir}/auth.ts          (또는 auth/index.ts)
+{src_root}/{routes_dir}/auth/login.ts
+{src_root}/{routes_dir}/auth/register.ts
+{src_root}/{routes_dir}/auth/oauth.ts
+{src_root}/{routes_dir}/auth/magic-link.ts
+```
+
+**NestJS:**
+```
+{src_root}/auth/auth.module.ts
+{src_root}/auth/auth.controller.ts
+{src_root}/auth/auth.service.ts
+{src_root}/auth/guards/jwt-auth.guard.ts
+{src_root}/auth/strategies/jwt.strategy.ts
+{src_root}/auth/dto/login.dto.ts
+{src_root}/auth/dto/register.dto.ts
+```
+
+**SvelteKit:**
+```
+src/routes/api/auth/login/+server.ts
+src/routes/api/auth/register/+server.ts
+src/routes/api/auth/logout/+server.ts
+src/routes/api/auth/oauth/[provider]/callback/+server.ts
+```
+
+**Nuxt 3:**
+```
+server/api/auth/login.post.ts
+server/api/auth/register.post.ts
+server/api/auth/logout.post.ts
+server/api/auth/me.get.ts
+server/api/auth/oauth/[provider]/callback.get.ts
+```
+
+#### 공통 유틸리티 파일
+
+감지된 구조에 맞는 위치에 생성:
+```
+{util_dir}/auth/jwt.ts              # JWT 생성/검증
+{util_dir}/auth/password.ts         # 비밀번호 해싱
+{util_dir}/auth/oauth.ts            # OAuth 유틸 (선택)
+{util_dir}/auth/token-blacklist.ts  # 토큰 무효화 (선택)
+{service_dir}/auth.service.ts       # 인증 서비스 로직 (서비스 레이어 존재 시)
+{middleware_dir}/auth.ts            # 인증 미들웨어/가드
+{types_dir}/auth.ts                 # 타입 정의
+```
+
+### 2.2 DB 스키마 생성
+
+감지된 ORM에 따라 스키마를 생성한다.
+
+#### Prisma
 ```prisma
 model User {
   id            String    @id @default(cuid())
   email         String    @unique
-  password      String?   // OAuth 전용 사용자는 null
+  password      String?
   name          String?
-  role          Role      @default(USER)
+  role          String    @default("user")
   emailVerified DateTime?
   isActive      Boolean   @default(true)
-
   oauthAccounts OAuthAccount[]
   magicLinks    MagicLink[]
-
   lastLoginAt   DateTime?
-  lastLoginIp   String?
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 }
 
 model OAuthAccount {
-  id            String   @id @default(cuid())
-  userId        String
-  provider      String   // 'google' | 'github'
-  providerId    String
-  accessToken   String?
-  refreshToken  String?
-
-  user          User     @relation(fields: [userId], references: [id])
-
+  id         String @id @default(cuid())
+  userId     String
+  provider   String
+  providerId String
+  user       User   @relation(fields: [userId], references: [id])
   @@unique([provider, providerId])
 }
 
 model MagicLink {
-  id        String   @id @default(cuid())
+  id        String    @id @default(cuid())
   userId    String
-  token     String   @unique
+  token     String    @unique
   expiresAt DateTime
   usedAt    DateTime?
-
-  user      User     @relation(fields: [userId], references: [id])
-}
-
-enum Role {
-  USER
-  ADMIN
+  user      User      @relation(fields: [userId], references: [id])
 }
 ```
 
-## 3. JWT Manager 구현
+#### Drizzle
+```typescript
+import { pgTable, text, timestamp, boolean, unique } from 'drizzle-orm/pg-core';
+import { createId } from '@paralleldrive/cuid2';
 
-### 핵심 구조
+export const users = pgTable('users', {
+  id: text('id').primaryKey().$defaultFn(() => createId()),
+  email: text('email').notNull().unique(),
+  password: text('password'),
+  name: text('name'),
+  role: text('role').notNull().default('user'),
+  emailVerified: timestamp('email_verified'),
+  isActive: boolean('is_active').notNull().default(true),
+  lastLoginAt: timestamp('last_login_at'),
+  createdAt: timestamp('created_at').notNull().defaultNow(),
+  updatedAt: timestamp('updated_at').notNull().defaultNow(),
+});
+
+export const oauthAccounts = pgTable('oauth_accounts', {
+  id: text('id').primaryKey().$defaultFn(() => createId()),
+  userId: text('user_id').notNull().references(() => users.id),
+  provider: text('provider').notNull(),
+  providerId: text('provider_id').notNull(),
+}, (t) => [unique().on(t.provider, t.providerId)]);
+
+export const magicLinks = pgTable('magic_links', {
+  id: text('id').primaryKey().$defaultFn(() => createId()),
+  userId: text('user_id').notNull().references(() => users.id),
+  token: text('token').notNull().unique(),
+  expiresAt: timestamp('expires_at').notNull(),
+  usedAt: timestamp('used_at'),
+});
+```
+
+#### TypeORM
+```typescript
+@Entity('users')
+export class User {
+  @PrimaryGeneratedColumn('uuid') id: string;
+  @Column({ unique: true }) email: string;
+  @Column({ nullable: true }) password: string;
+  @Column({ nullable: true }) name: string;
+  @Column({ default: 'user' }) role: string;
+  @Column({ type: 'timestamp', nullable: true }) emailVerified: Date;
+  @Column({ default: true }) isActive: boolean;
+  @OneToMany(() => OAuthAccount, (oa) => oa.user) oauthAccounts: OAuthAccount[];
+  @CreateDateColumn() createdAt: Date;
+  @UpdateDateColumn() updatedAt: Date;
+}
+```
+
+#### Mongoose
+```typescript
+const userSchema = new Schema({
+  email: { type: String, required: true, unique: true },
+  password: { type: String },
+  name: { type: String },
+  role: { type: String, enum: ['user', 'admin'], default: 'user' },
+  emailVerified: { type: Date },
+  isActive: { type: Boolean, default: true },
+  lastLoginAt: { type: Date },
+}, { timestamps: true });
+```
+
+#### Supabase (SQL migration)
+```sql
+create table users (
+  id uuid primary key default gen_random_uuid(),
+  email text unique not null,
+  password text,
+  name text,
+  role text not null default 'user',
+  email_verified timestamptz,
+  is_active boolean not null default true,
+  last_login_at timestamptz,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+```
+
+### 2.3 JWT 유틸 (프레임워크 독립)
 
 ```typescript
-// src/shared/@withwiz/auth/core/jwt/index.ts
+// {util_dir}/auth/jwt.ts
 import { SignJWT, jwtVerify } from 'jose';
 
-export class JWTManager {
-  private secret: Uint8Array;
+const secret = new TextEncoder().encode(process.env.JWT_SECRET);
 
-  constructor(config: JWTConfig) {
-    this.secret = new TextEncoder().encode(config.secret);
-  }
+export async function createAccessToken(payload: { userId: string; email: string; role: string }) {
+  return new SignJWT(payload)
+    .setProtectedHeader({ alg: 'HS256' })
+    .setIssuedAt()
+    .setExpirationTime(process.env.JWT_EXPIRES_IN || '7d')
+    .sign(secret);
+}
 
-  async createAccessToken(payload: IAccessTokenPayload): Promise<string> {
-    return new SignJWT({ ...payload })
-      .setProtectedHeader({ alg: 'HS256' })
-      .setIssuedAt()
-      .setExpirationTime(this.config.accessTokenExpiry)
-      .sign(this.secret);
-  }
+export async function createRefreshToken(userId: string) {
+  return new SignJWT({ userId, type: 'refresh' })
+    .setProtectedHeader({ alg: 'HS256' })
+    .setIssuedAt()
+    .setExpirationTime(process.env.JWT_REFRESH_EXPIRES_IN || '30d')
+    .sign(secret);
+}
 
-  async createRefreshToken(userId: string): Promise<string> {
-    return new SignJWT({ userId, tokenType: 'refresh' })
-      .setProtectedHeader({ alg: 'HS256' })
-      .setIssuedAt()
-      .setExpirationTime(this.config.refreshTokenExpiry)
-      .sign(this.secret);
-  }
+export async function verifyToken(token: string) {
+  const { payload } = await jwtVerify(token, secret);
+  return payload;
+}
 
-  async verifyAccessToken(token: string): Promise<IAccessTokenPayload> {
-    const { payload } = await jwtVerify(token, this.secret);
-    return payload as IAccessTokenPayload;
-  }
-
-  extractTokenFromHeader(authHeader: string | null): string | null {
-    if (!authHeader?.startsWith('Bearer ')) return null;
-    return authHeader.slice(7);
-  }
+export function extractBearerToken(header: string | null): string | null {
+  if (!header?.startsWith('Bearer ')) return null;
+  return header.slice(7);
 }
 ```
 
-### 타입 정의
+### 2.4 비밀번호 유틸 (프레임워크 독립)
 
 ```typescript
-// src/shared/@withwiz/auth/core/jwt/types.ts
-export interface JWTConfig {
-  secret: string;              // 최소 32자
-  accessTokenExpiry: string;   // e.g., '7d'
-  refreshTokenExpiry: string;  // e.g., '30d'
-  algorithm: 'HS256';
+// {util_dir}/auth/password.ts
+import bcrypt from 'bcryptjs';
+
+const SALT_ROUNDS = 10;
+
+export async function hashPassword(password: string): Promise<string> {
+  return bcrypt.hash(password, SALT_ROUNDS);
 }
 
-export interface IAccessTokenPayload {
-  userId: string;
-  email: string;
-  role: 'USER' | 'ADMIN';
-  emailVerified: Date | null;
-  iat: number;
-  exp: number;
-}
-
-export interface IRefreshTokenPayload {
-  userId: string;
-  tokenType: 'refresh';
-  iat: number;
-  exp: number;
+export async function verifyPassword(password: string, hash: string): Promise<boolean> {
+  return bcrypt.compare(password, hash);
 }
 ```
 
-## 4. 인증 미들웨어
+### 2.5 인증 미들웨어 (프레임워크별 적응)
 
-```typescript
-// src/shared/@withwiz/middleware/auth.ts
-export const authMiddleware: TApiMiddleware = async (context, next) => {
-  const jwtManager = getJWTManager();
+생성 시 감지된 프레임워크의 미들웨어 패턴을 따른다.
 
-  // 1. 토큰 추출
-  const authHeader = context.request.headers.get('authorization');
-  const token = jwtManager.extractTokenFromHeader(authHeader);
-  if (!token) {
-    throw new AppError(UNAUTHORIZED.code);
-  }
+**프레임워크별 미들웨어 패턴:**
 
-  // 2. 블랙리스트 확인
-  const isRevoked = await isAccessTokenRevoked(token);
-  if (isRevoked) {
-    throw new AppError(INVALID_TOKEN.code, 'Token has been revoked');
-  }
+| 프레임워크 | 패턴 |
+|-----------|------|
+| Next.js App Router | `middleware.ts` 또는 래퍼 함수 |
+| Next.js Pages Router | HOF 래퍼 또는 `middleware.ts` |
+| Express | `(req, res, next) => {}` |
+| Fastify | `fastify.addHook('preHandler', ...)` 또는 플러그인 |
+| Hono | `app.use('*', async (c, next) => {})` |
+| NestJS | `@UseGuards(JwtAuthGuard)` |
+| SvelteKit | `hooks.server.ts` + `handle` |
+| Nuxt 3 | `server/middleware/auth.ts` |
 
-  // 3. 토큰 검증
-  const payload = await jwtManager.verifyAccessToken(token);
+코드 생성 시 **기존 프로젝트에 미들웨어 패턴이 이미 있으면 그 패턴을 따르고**, 없으면 프레임워크 표준 패턴을 사용한다.
 
-  // 4. 컨텍스트에 사용자 정보 추가
-  context.user = {
-    id: payload.userId,
-    email: payload.email,
-    role: payload.role,
-  };
+### 2.6 API 핸들러 (프레임워크별 적응)
 
-  return await next();
-};
+각 프레임워크의 요청/응답 API에 맞게 핸들러를 생성한다.
+프레임워크별 차이점:
+
+| 기능 | Next.js App Router | Express | Hono | NestJS |
+|------|-------------------|---------|------|--------|
+| 요청 body | `request.json()` | `req.body` | `c.req.json()` | `@Body() dto` |
+| 응답 | `NextResponse.json()` | `res.json()` | `c.json()` | `return dto` |
+| 쿼리 파라미터 | `request.nextUrl.searchParams` | `req.query` | `c.req.query()` | `@Query()` |
+| 헤더 | `request.headers.get()` | `req.headers[]` | `c.req.header()` | `@Headers()` |
+| 쿠키 설정 | `response.cookies.set()` | `res.cookie()` | `setCookie(c, ...)` | `@Res() res` |
+| 리다이렉트 | `NextResponse.redirect()` | `res.redirect()` | `c.redirect()` | `@Redirect()` |
+| 검증 | `zod` | `zod` / `joi` | `zod` / `@hono/zod-validator` | `class-validator` |
+
+---
+
+## Phase 3: 환경 변수 설정
+
+선택된 인증 방식에 따라 `.env.example` 에 추가할 변수 목록을 제시한다.
+
+```env
+# === Auth Core (필수) ===
+JWT_SECRET=                          # 최소 32자
+JWT_EXPIRES_IN=7d
+JWT_REFRESH_EXPIRES_IN=30d
+
+# === OAuth - Google (OAuth 선택 시) ===
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
+GOOGLE_REDIRECT_URI=http://localhost:{port}/api/auth/oauth/google/callback
+
+# === OAuth - GitHub (OAuth 선택 시) ===
+GITHUB_CLIENT_ID=
+GITHUB_CLIENT_SECRET=
+GITHUB_REDIRECT_URI=http://localhost:{port}/api/auth/oauth/github/callback
+
+# === Magic Link (Magic Link 선택 시) ===
+MAGIC_LINK_SECRET=
+MAGIC_LINK_EXPIRES_IN=15m
+EMAIL_FROM=noreply@example.com
+
+# === Token Blacklist - Redis (선택) ===
+REDIS_URL=
+# 또는 Upstash:
+# UPSTASH_REDIS_REST_URL=
+# UPSTASH_REDIS_REST_TOKEN=
 ```
 
-### API 래퍼 함수
+`{port}` 는 프로젝트의 기본 포트를 감지하여 결정한다 (package.json scripts, 설정 파일 등).
 
-```typescript
-// src/shared/@withwiz/middleware/wrappers.ts
-export function withPublicApi(handler: ApiHandler) {
-  return applyMiddleware(handler, [
-    errorHandlerMiddleware,
-    securityMiddleware,
-    corsMiddleware,
-    initRequestMiddleware,
-    rateLimitMiddleware.api,
-    responseLoggerMiddleware,
-  ]);
-}
+---
 
-export function withAuthApi(handler: ApiHandler) {
-  return applyMiddleware(handler, [
-    errorHandlerMiddleware,
-    securityMiddleware,
-    corsMiddleware,
-    initRequestMiddleware,
-    authMiddleware,  // JWT 검증 추가
-    rateLimitMiddleware.api,
-    responseLoggerMiddleware,
-  ]);
-}
+## Phase 4: 의존성 설치
 
-export function withAdminApi(handler: ApiHandler) {
-  return applyMiddleware(handler, [
-    // ...withAuthApi 미들웨어 +
-    adminMiddleware,  // role === 'ADMIN' 확인
-  ]);
-}
+감지된 패키지 매니저로 필요한 패키지를 설치한다.
+
+```
+# 공통 필수
+jose            # JWT (Edge Runtime 호환, jsonwebtoken 대신 사용)
+bcryptjs        # 비밀번호 해싱
+zod             # 입력 검증 (NestJS는 class-validator 사용)
+
+# 선택적
+@upstash/redis  # 토큰 블랙리스트 (Redis 선택 시)
+nodemailer      # Magic Link 이메일 발송 시
 ```
 
-## 5. API 엔드포인트 구현
+NestJS인 경우: `@nestjs/jwt`, `@nestjs/passport`, `passport-jwt`, `class-validator`, `class-transformer` 를 대신 사용할 수 있다.
 
-### 5.1 로그인 (ID/Password)
+---
 
-```typescript
-// src/app/api/auth/login/route.ts
-import { withPublicApi } from '@/shared/@withwiz/middleware/wrappers';
-
-const loginSchema = z.object({
-  email: z.string().email(),
-  password: z.string().min(1),
-});
-
-export const POST = withPublicApi(async (context) => {
-  const body = await context.request.json();
-  const { email, password } = loginSchema.parse(body);
-
-  // 1. 사용자 조회
-  const user = await prisma.user.findUnique({ where: { email } });
-  if (!user || !user.password) {
-    throw new AppError(UNAUTHORIZED.code, 'Invalid credentials');
-  }
-
-  // 2. 비밀번호 검증
-  const isValid = await bcrypt.compare(password, user.password);
-  if (!isValid) {
-    throw new AppError(UNAUTHORIZED.code, 'Invalid credentials');
-  }
-
-  // 3. 이메일 인증 확인
-  if (!user.emailVerified) {
-    throw new AppError(EMAIL_NOT_VERIFIED.code);
-  }
-
-  // 4. 계정 활성화 확인
-  if (!user.isActive) {
-    throw new AppError(ACCOUNT_DISABLED.code);
-  }
-
-  // 5. 토큰 발급
-  const { accessToken, refreshToken } = await createTokenPair(user);
-
-  // 6. 로그인 이력 기록
-  await updateLastLoginAt(user.id, context);
-
-  return NextResponse.json({
-    accessToken,
-    refreshToken,
-    user: sanitizeUser(user),
-  });
-});
-```
-
-### 5.2 OAuth 로그인 시작
-
-```typescript
-// src/app/api/auth/oauth/login/route.ts
-const oauthSchema = z.object({
-  provider: z.enum(['google', 'github']),
-});
-
-export const POST = withPublicApi(async (context) => {
-  const { provider } = oauthSchema.parse(await context.request.json());
-
-  // CSRF 보호용 state 생성
-  const state = randomBytes(32).toString('hex');
-  const loginUrl = getOAuthLoginUrl(provider, state);
-
-  return NextResponse.json({ loginUrl, provider, state });
-});
-```
-
-### 5.3 OAuth 콜백 (Google)
-
-```typescript
-// src/app/api/auth/oauth/google/callback/route.ts
-export async function GET(request: NextRequest) {
-  const code = request.nextUrl.searchParams.get('code');
-  const error = request.nextUrl.searchParams.get('error');
-
-  if (error || !code) {
-    return NextResponse.redirect('/auth/error?reason=oauth_denied');
-  }
-
-  try {
-    // 1. 코드 → 토큰 교환
-    const oauthToken = await exchangeGoogleCodeForToken(code);
-
-    // 2. 사용자 정보 조회
-    const oauthUser = await getGoogleUserInfo(oauthToken.access_token);
-    const normalizedUser = normalizeGoogleUser(oauthUser);
-
-    // 3. 사용자 생성 또는 조회
-    const user = await findOrCreateOAuthUser(normalizedUser, 'google');
-
-    // 4. JWT 토큰 발급
-    const { accessToken, refreshToken } = await createTokenPair(user);
-
-    // 5. 성공 페이지로 리다이렉트
-    const successUrl = new URL('/auth/oauth/success', request.url);
-    successUrl.searchParams.set('accessToken', accessToken);
-    successUrl.searchParams.set('refreshToken', refreshToken);
-    successUrl.searchParams.set('provider', 'google');
-
-    return NextResponse.redirect(successUrl);
-  } catch (error) {
-    return NextResponse.redirect('/auth/error?reason=oauth_failed');
-  }
-}
-```
-
-### 5.4 Magic Link 발송
-
-```typescript
-// src/app/api/auth/magic-link/send/route.ts
-const sendSchema = z.object({
-  email: z.string().email(),
-});
-
-export const POST = withPublicApi(async (context) => {
-  const { email } = sendSchema.parse(await context.request.json());
-
-  // 1. 사용자 조회 또는 생성
-  let user = await prisma.user.findUnique({ where: { email } });
-  if (!user) {
-    user = await prisma.user.create({
-      data: { email, emailVerified: new Date() },
-    });
-  }
-
-  // 2. 기존 미사용 링크 무효화
-  await prisma.magicLink.updateMany({
-    where: { userId: user.id, usedAt: null },
-    data: { usedAt: new Date() },
-  });
-
-  // 3. 새 Magic Link 생성
-  const token = randomBytes(32).toString('hex');
-  const expiresAt = new Date(Date.now() + 15 * 60 * 1000); // 15분
-
-  await prisma.magicLink.create({
-    data: { userId: user.id, token, expiresAt },
-  });
-
-  // 4. 이메일 발송
-  const magicUrl = `${process.env.NEXT_PUBLIC_APP_URL}/auth/magic-link?token=${token}`;
-  await sendMagicLinkEmail(email, magicUrl);
-
-  return NextResponse.json({ message: 'Magic link sent' });
-});
-```
-
-### 5.5 Magic Link 검증
-
-```typescript
-// src/app/api/auth/magic-link/verify/route.ts
-export async function GET(request: NextRequest) {
-  const token = request.nextUrl.searchParams.get('token');
-
-  if (!token) {
-    return NextResponse.redirect('/auth/error?reason=invalid_link');
-  }
-
-  // 1. 링크 조회
-  const magicLink = await prisma.magicLink.findUnique({
-    where: { token },
-    include: { user: true },
-  });
-
-  // 2. 유효성 검증
-  if (!magicLink || magicLink.usedAt || magicLink.expiresAt < new Date()) {
-    return NextResponse.redirect('/auth/error?reason=expired_link');
-  }
-
-  // 3. 링크 사용 처리
-  await prisma.magicLink.update({
-    where: { id: magicLink.id },
-    data: { usedAt: new Date() },
-  });
-
-  // 4. JWT 토큰 발급
-  const { accessToken, refreshToken } = await createTokenPair(magicLink.user);
-
-  // 5. 성공 리다이렉트
-  const successUrl = new URL('/auth/magic-link/success', request.url);
-  successUrl.searchParams.set('accessToken', accessToken);
-  successUrl.searchParams.set('refreshToken', refreshToken);
-
-  return NextResponse.redirect(successUrl);
-}
-```
-
-### 5.6 토큰 갱신
-
-```typescript
-// src/app/api/auth/refresh/route.ts
-const refreshSchema = z.object({
-  refreshToken: z.string(),
-});
-
-export const POST = withPublicApi(async (context) => {
-  const { refreshToken } = refreshSchema.parse(await context.request.json());
-
-  // 1. Refresh Token 검증
-  const payload = await verifyRefreshToken(refreshToken);
-
-  // 2. 블랙리스트 확인
-  const isRevoked = await isTokenRevoked(refreshToken);
-  if (isRevoked) {
-    throw new AppError(INVALID_TOKEN.code, 'Token has been revoked');
-  }
-
-  // 3. 사용자 조회
-  const user = await prisma.user.findUnique({
-    where: { id: payload.userId },
-  });
-
-  if (!user || !user.isActive) {
-    throw new AppError(ACCOUNT_DISABLED.code);
-  }
-
-  // 4. 새 토큰 쌍 발급
-  const tokens = await createTokenPair(user);
-
-  return NextResponse.json({
-    ...tokens,
-    user: sanitizeUser(user),
-  });
-});
-```
-
-### 5.7 로그아웃
-
-```typescript
-// src/app/api/auth/logout/route.ts
-export const POST = withAuthApi(async (context) => {
-  const { refreshToken } = await context.request.json();
-
-  // Access Token 추출
-  const authHeader = context.request.headers.get('authorization');
-  const accessToken = extractTokenFromHeader(authHeader);
-
-  // 토큰 블랙리스트 추가
-  if (accessToken) {
-    await revokeAccessToken(accessToken, 7 * 24 * 60 * 60); // 7일
-  }
-  if (refreshToken) {
-    await revokeToken(refreshToken, 30 * 24 * 60 * 60); // 30일
-  }
-
-  return NextResponse.json({ message: 'Logged out successfully' });
-});
-```
-
-## 6. OAuth 유틸리티
-
-```typescript
-// src/lib/utils/oauth.ts
-export function getOAuthLoginUrl(provider: string, state: string): string {
-  const config = getOAuthConfig(provider);
-  const params = new URLSearchParams({
-    client_id: config.clientId,
-    redirect_uri: config.redirectUri,
-    state,
-    response_type: 'code',
-    scope: config.scope,
-  });
-
-  return `${config.authUrl}?${params.toString()}`;
-}
-
-export async function exchangeGoogleCodeForToken(code: string) {
-  const response = await fetch('https://oauth2.googleapis.com/token', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      code,
-      client_id: process.env.GOOGLE_CLIENT_ID!,
-      client_secret: process.env.GOOGLE_CLIENT_SECRET!,
-      redirect_uri: process.env.GOOGLE_REDIRECT_URI!,
-      grant_type: 'authorization_code',
-    }),
-  });
-
-  return response.json();
-}
-
-export async function getGoogleUserInfo(accessToken: string) {
-  const response = await fetch(
-    'https://www.googleapis.com/oauth2/v2/userinfo',
-    { headers: { Authorization: `Bearer ${accessToken}` } }
-  );
-
-  return response.json();
-}
-```
-
-## 7. 토큰 블랙리스트 서비스
-
-```typescript
-// src/lib/services/auth/refreshTokenService.ts
-class RefreshTokenService {
-  private inMemoryBlacklist = new Map<string, number>();
-
-  async revokeToken(token: string, ttlSeconds: number): Promise<void> {
-    const hash = this.hashToken(token);
-    const expiresAt = Date.now() + ttlSeconds * 1000;
-
-    // Redis 저장 시도
-    try {
-      await redis.set(`revoked:${hash}`, '1', { ex: ttlSeconds });
-    } catch {
-      // Redis 실패 시 인메모리 폴백
-    }
-
-    // 인메모리 저장 (항상)
-    this.inMemoryBlacklist.set(hash, expiresAt);
-  }
-
-  async isTokenRevoked(token: string): Promise<boolean> {
-    const hash = this.hashToken(token);
-
-    // 인메모리 먼저 확인 (빠름)
-    const inMemory = this.inMemoryBlacklist.get(hash);
-    if (inMemory && inMemory > Date.now()) {
-      return true;
-    }
-
-    // Redis 확인
-    try {
-      const revoked = await redis.get(`revoked:${hash}`);
-      return !!revoked;
-    } catch {
-      return false;
-    }
-  }
-
-  private hashToken(token: string): string {
-    return createHash('sha256').update(token).digest('hex');
-  }
-}
-```
-
-## 8. 에러 코드 정의
-
-```typescript
-// src/shared/@withwiz/errors/codes.ts
-export const AUTH_ERRORS = {
-  UNAUTHORIZED: { code: 40101, status: 401, key: 'UNAUTHORIZED' },
-  INVALID_TOKEN: { code: 40102, status: 401, key: 'INVALID_TOKEN' },
-  TOKEN_EXPIRED: { code: 40103, status: 401, key: 'TOKEN_EXPIRED' },
-  ACCOUNT_DISABLED: { code: 40301, status: 403, key: 'ACCOUNT_DISABLED' },
-  EMAIL_NOT_VERIFIED: { code: 40305, status: 403, key: 'EMAIL_NOT_VERIFIED' },
-  OAUTH_FAILED: { code: 40106, status: 401, key: 'OAUTH_FAILED' },
-  MAGIC_LINK_EXPIRED: { code: 40107, status: 401, key: 'MAGIC_LINK_EXPIRED' },
-};
-```
-
-## 9. 클라이언트 통합
-
-### HttpOnly Cookie 설정 (권장)
-
-```typescript
-// 로그인 응답에서 쿠키 설정
-const response = NextResponse.json({ user });
-response.cookies.set('accessToken', accessToken, {
-  httpOnly: true,
-  secure: process.env.NODE_ENV === 'production',
-  sameSite: 'lax',
-  maxAge: 7 * 24 * 60 * 60, // 7일
-  path: '/',
-});
-response.cookies.set('refreshToken', refreshToken, {
-  httpOnly: true,
-  secure: process.env.NODE_ENV === 'production',
-  sameSite: 'lax',
-  maxAge: 30 * 24 * 60 * 60, // 30일
-  path: '/',
-});
-```
-
-### React Context 예시
-
-```typescript
-// src/contexts/AuthContext.tsx
-export function AuthProvider({ children }: { children: React.ReactNode }) {
-  const [user, setUser] = useState<User | null>(null);
-
-  const login = async (email: string, password: string) => {
-    const res = await fetch('/api/auth/login', {
-      method: 'POST',
-      body: JSON.stringify({ email, password }),
-      credentials: 'include', // 쿠키 포함
-    });
-    const data = await res.json();
-    setUser(data.user);
-  };
-
-  const logout = async () => {
-    await fetch('/api/auth/logout', {
-      method: 'POST',
-      credentials: 'include',
-    });
-    setUser(null);
-  };
-
-  return (
-    <AuthContext.Provider value={{ user, login, logout }}>
-      {children}
-    </AuthContext.Provider>
-  );
-}
-```
-
-## 체크리스트
-
-생성 시 확인할 항목:
-
-- [ ] JWT_SECRET 32자 이상 설정
-- [ ] Prisma 스키마에 User, OAuthAccount, MagicLink 모델 추가
-- [ ] OAuth 제공자 콘솔에서 Redirect URI 설정
-- [ ] 이메일 발송 서비스 연동 (Magic Link용)
-- [ ] Redis 연결 설정 (토큰 블랙리스트용)
-- [ ] Rate Limiting 설정
-- [ ] 에러 코드 및 메시지 정의
-- [ ] 로그인/로그아웃 후 리다이렉트 경로 설정
-
-## 보안 고려사항
+## Phase 5: 보안 체크리스트
 
 | 항목 | 구현 |
 |------|------|
 | 비밀번호 | bcrypt 해싱 (salt rounds: 10+) |
-| JWT | HS256 알고리즘, HttpOnly 쿠키 저장 |
+| JWT | HS256 알고리즘, HttpOnly 쿠키 저장 권장 |
 | OAuth | CSRF 보호 (state 파라미터) |
 | Magic Link | 15분 만료, 일회용, 토큰 해시 저장 |
-| Rate Limit | 로그인 분당 10회, API 분당 120회 |
-| 토큰 무효화 | Redis + 인메모리 하이브리드 블랙리스트 |
+| Rate Limit | 프레임워크에 맞는 rate limiter 적용 |
+| 토큰 무효화 | Redis 또는 인메모리 블랙리스트 |
+| 에러 메시지 | 사용자 존재 여부를 노출하지 않는 일관된 에러 |
+| CORS | 프로덕션 도메인만 허용 |
+
+---
+
+## 핵심 규칙
+
+1. **감지 우선**: 코드 생성 전에 반드시 Phase 0 프로젝트 감지를 완료한다.
+2. **기존 패턴 준수**: 프로젝트에 이미 있는 코드 스타일, 네이밍, 디렉토리 구조를 따른다.
+3. **최소 의존성**: 프레임워크에 이미 포함된 기능은 외부 패키지 대신 활용한다.
+4. **점진적 생성**: 사용자가 선택한 인증 방식에 해당하는 파일만 생성한다.
+5. **충돌 방지**: 기존 파일을 덮어쓰지 않고, 충돌 가능성이 있으면 사용자에게 확인한다.
+6. **import 경로**: 감지된 tsconfig paths alias를 사용한다.
